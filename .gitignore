@@ -1,3 +1,5 @@
 node_modules/
 hub-audit.log
 *.out
+.rah-token.local
+*.local.out

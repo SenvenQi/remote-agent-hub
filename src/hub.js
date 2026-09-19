@@ -81,7 +81,7 @@ wss.on('connection', (ws, req) => {
       agent.pending.delete(msg.reqId);
     } else if (msg.t === 'result') {
       p.resolve({ ok: msg.ok, dataB64: msg.dataB64, error: msg.error,
-        abs: msg.abs, entries: msg.entries, truncated: msg.truncated });
+        abs: msg.abs, entries: msg.entries, truncated: msg.truncated, wrote: msg.wrote });
       agent.pending.delete(msg.reqId);
     }
   });
@@ -230,6 +230,12 @@ const ctrl = http.createServer(async (req, res) => {
     }
     if (req.url === '/list') {
       const r = await dispatch(agent.id, { t: 'list', cwd: agent.cwd, path: body.path || '.' }, 30000);
+      return json(200, r);
+    }
+    if (req.url === '/push') {
+      const { dest, single, clear, dirs, files } = body;
+      audit('push', { agentId: agent.id, cwd: agent.cwd, dest, clear: !!clear, files: (files || []).length });
+      const r = await dispatch(agent.id, { t: 'push', cwd: agent.cwd, dest, single, clear, dirs, files }, 180000);
       return json(200, r);
     }
     if (req.url === '/start') {

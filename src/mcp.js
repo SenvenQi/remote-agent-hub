@@ -6,6 +6,8 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import fs from 'node:fs';
+import path from 'node:path';
 import { HUB_CTRL_PORT, CTRL_HOST } from './protocol.js';
 
 const BASE = process.env.RAH_CTRL_URL || `http://${CTRL_HOST}:${HUB_CTRL_PORT}`;
@@ -125,6 +127,66 @@ server.registerTool('kill_command', {
 }, async ({ agentId, jobId }) => {
   const r = await ctrl('POST', '/kill', { agentId, jobId });
   return text(r.ok ? `killed ${jobId}` : 'kill failed: ' + r.error);
+});
+
+server.registerTool('push_path', {
+  title: 'Push a local file or directory to an agent',
+  description: 'Copy a file or an entire directory tree from THIS machine (where the hub runs) to the agent, under remotePath (relative to the agent workdir, or absolute). For a directory, the tree is mirrored. With overwrite:true the destination directory is wiped first (clean overwrite); otherwise files are merged/replaced. node_modules and .git are skipped by default.',
+  inputSchema: {
+    agentId: z.string().describe('id from list_agents'),
+    localPath: z.string().describe('file or directory on the hub machine to send'),
+    remotePath: z.string().optional().describe('destination on the agent (relative to workdir or absolute); default: the basename of localPath'),
+    overwrite: z.boolean().optional().describe('if true, wipe the destination directory before copying (clean mirror)'),
+    exclude: z.array(z.string()).optional().describe('directory/file names to skip; default ["node_modules",".git",".DS_Store"]'),
+  },
+}, async ({ agentId, localPath, remotePath, overwrite, exclude }) => {
+  const absLocal = path.resolve(localPath);
+  let st;
+  try { st = fs.statSync(absLocal); } catch { return text('local path not found: ' + absLocal); }
+  const dest = remotePath || path.basename(absLocal);
+
+  try {
+    if (st.isFile()) {
+      const dataB64 = fs.readFileSync(absLocal).toString('base64');
+      const r = await ctrl('POST', '/push', { agentId, dest, single: true, files: [{ rel: path.basename(absLocal), dataB64 }] });
+      return text(r.ok ? `pushed file -> ${r.abs} (1 file)` : 'push failed: ' + r.error);
+    }
+    // directory: walk it, honoring excludes
+    const ex = new Set(exclude ?? ['node_modules', '.git', '.DS_Store']);
+    const files = [], dirs = [];
+    (function walk(dir, rel) {
+      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+        if (ex.has(e.name)) continue;
+        const full = path.join(dir, e.name);
+        const r = rel ? rel + '/' + e.name : e.name;
+        if (e.isDirectory()) { dirs.push(r); walk(full, r); }
+        else if (e.isFile()) files.push({ full, rel: r });
+      }
+    })(absLocal, '');
+
+    // send in batches (~6 MB of base64 per call) so no single message is huge
+    const BATCH = 6 * 1024 * 1024;
+    let batch = [], size = 0, first = true, wrote = 0, lastAbs = dest;
+    const flush = async () => {
+      if (!first && !batch.length) return;
+      const r = await ctrl('POST', '/push', {
+        agentId, dest, clear: first && !!overwrite,
+        dirs: first ? dirs : [], files: batch,
+      });
+      if (!r.ok) throw new Error(r.error);
+      wrote += r.wrote || 0; lastAbs = r.abs || lastAbs; first = false; batch = []; size = 0;
+    };
+    for (const f of files) {
+      const dataB64 = fs.readFileSync(f.full).toString('base64');
+      batch.push({ rel: f.rel, dataB64 });
+      size += dataB64.length;
+      if (size >= BATCH) await flush();
+    }
+    await flush();
+    return text(`pushed directory -> ${lastAbs}\n${wrote} files, ${dirs.length} dirs${overwrite ? ' (destination overwritten)' : ''}`);
+  } catch (e) {
+    return text('push failed: ' + e.message);
+  }
 });
 
 server.registerTool('read_file', {

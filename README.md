@@ -77,6 +77,10 @@ Then in a session:
 - `kill_command { agentId, jobId }` — force-kill a job (whole process tree)
 - `read_file { agentId, path }` / `write_file { agentId, path, content }` — paths
   are relative to the workdir (or absolute); write creates parent dirs
+- `push_path { agentId, localPath, remotePath?, overwrite?, exclude? }` — copy a
+  local file or whole directory tree (from the hub machine) to the agent. Mirrors
+  the tree, handles binary files, skips `node_modules`/`.git` by default, and with
+  `overwrite:true` wipes the destination first for a clean overwrite
 
 The working directory is remembered by the hub, keyed by agent **name**, so it
 behaves like a persistent shell session: set it once and keep working with

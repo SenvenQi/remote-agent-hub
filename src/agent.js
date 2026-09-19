@@ -69,6 +69,7 @@ function connect() {
     if (m.t === 'read') return doRead(ws, m);
     if (m.t === 'write') return doWrite(ws, m);
     if (m.t === 'list') return doList(ws, m);
+    if (m.t === 'push') return doPush(ws, m);
   });
 
   ws.on('close', () => { log('[agent] disconnected, retrying in 3s'); setTimeout(connect, 3000); });
@@ -129,6 +130,35 @@ async function doWrite(ws, m) {
     await fs.mkdir(path.dirname(p), { recursive: true });
     await fs.writeFile(p, Buffer.from(m.dataB64 || '', 'base64'));
     send(ws, { t: 'result', reqId: m.reqId, ok: true, abs: p });
+  } catch (e) { send(ws, { t: 'result', reqId: m.reqId, ok: false, error: e.message }); }
+}
+
+// Receive a batch of files (a whole file or directory tree) and write them
+// under `dest`. `clear` wipes dest first for a clean mirror/overwrite. Paths
+// that would escape dest are skipped defensively.
+async function doPush(ws, m) {
+  try {
+    const dest = path.resolve(m.cwd || process.cwd(), m.dest || '.');
+    if (m.single) {
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await fs.writeFile(dest, Buffer.from((m.files?.[0]?.dataB64) || '', 'base64'));
+      return send(ws, { t: 'result', reqId: m.reqId, ok: true, abs: dest, wrote: 1 });
+    }
+    if (m.clear) await fs.rm(dest, { recursive: true, force: true });
+    await fs.mkdir(dest, { recursive: true });
+    for (const d of (m.dirs || [])) {
+      const dp = path.resolve(dest, d);
+      if (dp === dest || dp.startsWith(dest + path.sep)) await fs.mkdir(dp, { recursive: true });
+    }
+    let n = 0;
+    for (const f of (m.files || [])) {
+      const p = path.resolve(dest, f.rel);
+      if (p !== dest && !p.startsWith(dest + path.sep)) continue; // no traversal
+      await fs.mkdir(path.dirname(p), { recursive: true });
+      await fs.writeFile(p, Buffer.from(f.dataB64 || '', 'base64'));
+      n++;
+    }
+    send(ws, { t: 'result', reqId: m.reqId, ok: true, abs: dest, wrote: n });
   } catch (e) { send(ws, { t: 'result', reqId: m.reqId, ok: false, error: e.message }); }
 }
 
