@@ -29,8 +29,13 @@ function audit(event, data) {
   fs.appendFile(LOG_PATH, line, () => {});
 }
 
-/** @type {Map<string, {id, name, meta, ws, connectedAt, pending: Map}>} */
+/** @type {Map<string, {id, name, meta, ws, connectedAt, pending: Map, cwd: string}>} */
 const agents = new Map();
+
+// Working directory remembered per agent NAME (not id), so it survives the
+// agent reconnecting with a fresh id -- like keeping your shell's cwd.
+/** @type {Map<string, string>} */
+const workdirs = new Map();
 
 // ---- WebSocket side: agents connect here ---------------------------------
 const wss = new WebSocketServer({ port: HUB_WS_PORT, host: '0.0.0.0' });
@@ -52,7 +57,10 @@ wss.on('connection', (ws, req) => {
         return;
       }
       const id = newId('agent');
-      agent = { id, name: String(msg.name || 'unnamed'), meta: msg.meta || {}, ws, connectedAt: Date.now(), pending: new Map() };
+      const name = String(msg.name || 'unnamed');
+      // restore remembered cwd for this name, else default to what the agent reported
+      const cwd = workdirs.get(name) || (msg.meta && msg.meta.cwd) || '.';
+      agent = { id, name, meta: msg.meta || {}, ws, connectedAt: Date.now(), pending: new Map(), cwd };
       agents.set(id, agent);
       send(ws, { t: 'registered', id });
       audit('register', { id, name: agent.name, ip, meta: agent.meta });
@@ -70,7 +78,8 @@ wss.on('connection', (ws, req) => {
         stdout: p.stdout.join(''), stderr: p.stderr.join('') });
       agent.pending.delete(msg.reqId);
     } else if (msg.t === 'result') {
-      p.resolve({ ok: msg.ok, dataB64: msg.dataB64, error: msg.error });
+      p.resolve({ ok: msg.ok, dataB64: msg.dataB64, error: msg.error,
+        abs: msg.abs, entries: msg.entries, truncated: msg.truncated });
       agent.pending.delete(msg.reqId);
     }
   });
@@ -128,7 +137,7 @@ const ctrl = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/agents') {
     return json(200, {
       agents: [...agents.values()].map(a => ({
-        id: a.id, name: a.name, meta: a.meta,
+        id: a.id, name: a.name, meta: a.meta, cwd: a.cwd,
         connectedAt: new Date(a.connectedAt).toISOString(),
         inflight: a.pending.size,
       })),
@@ -137,25 +146,40 @@ const ctrl = http.createServer(async (req, res) => {
 
   if (req.method === 'POST') {
     let body; try { body = JSON.parse(await readBody(req) || '{}'); } catch { return json(400, { error: 'bad json' }); }
+    const agent = agents.get(body.agentId);
+    if (!agent) return json(404, { ok: false, error: `no agent ${body.agentId}` });
 
     if (req.url === '/exec') {
-      const { agentId, cmd, cwd, timeout } = body;
+      const { cmd, timeout } = body;
       if (!cmd) return json(400, { error: 'cmd required' });
-      audit('exec', { agentId, cmd, cwd });
-      const r = await dispatch(agentId, { t: 'exec', cmd, cwd, timeout: timeout || 120000 }, (timeout || 120000) + 5000);
+      audit('exec', { agentId: agent.id, cwd: agent.cwd, cmd });
+      const r = await dispatch(agent.id, { t: 'exec', cmd, cwd: agent.cwd, timeout: timeout || 120000 }, (timeout || 120000) + 5000);
       return json(200, r);
     }
     if (req.url === '/read') {
-      const { agentId, path: p } = body;
-      audit('read', { agentId, path: p });
-      const r = await dispatch(agentId, { t: 'read', path: p }, 30000);
+      audit('read', { agentId: agent.id, cwd: agent.cwd, path: body.path });
+      const r = await dispatch(agent.id, { t: 'read', cwd: agent.cwd, path: body.path }, 30000);
       return json(200, r);
     }
     if (req.url === '/write') {
-      const { agentId, path: p, dataB64 } = body;
-      audit('write', { agentId, path: p, bytes: dataB64 ? Buffer.byteLength(dataB64, 'base64') : 0 });
-      const r = await dispatch(agentId, { t: 'write', path: p, dataB64 }, 30000);
+      const { path: p, dataB64 } = body;
+      audit('write', { agentId: agent.id, cwd: agent.cwd, path: p, bytes: dataB64 ? Buffer.byteLength(dataB64, 'base64') : 0 });
+      const r = await dispatch(agent.id, { t: 'write', cwd: agent.cwd, path: p, dataB64 }, 30000);
       return json(200, r);
+    }
+    if (req.url === '/list') {
+      const r = await dispatch(agent.id, { t: 'list', cwd: agent.cwd, path: body.path || '.' }, 30000);
+      return json(200, r);
+    }
+    if (req.url === '/setwd') {
+      // resolve+validate on the agent (real filesystem, real path rules) so
+      // relative moves like "src" or ".." behave like a shell cd.
+      const r = await dispatch(agent.id, { t: 'list', cwd: agent.cwd, path: body.path || '.' }, 30000);
+      if (!r.ok) return json(200, { ok: false, error: r.error || 'cannot cd there', cwd: agent.cwd });
+      agent.cwd = r.abs;
+      workdirs.set(agent.name, r.abs);
+      audit('setwd', { agentId: agent.id, name: agent.name, cwd: r.abs });
+      return json(200, { ok: true, cwd: r.abs, entries: r.entries, truncated: r.truncated });
     }
   }
   json(404, { error: 'not found' });

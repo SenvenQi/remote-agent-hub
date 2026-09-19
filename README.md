@@ -63,9 +63,17 @@ claude mcp add remote-agent-hub -- node C:/Users/Administrator/Repos/remote-agen
 
 Then in a session:
 
-- `list_agents` — see who is connected
-- `run_command { agentId, cmd, cwd?, timeout? }` — run a shell command
-- `read_file { agentId, path }` / `write_file { agentId, path, content }`
+- `list_agents` — see who is connected, with each agent's current **workdir**
+- `set_workdir { agentId, path }` — like `cd`; absolute or relative (incl. `..`).
+  Sticks for all later calls and **survives the agent reconnecting**.
+- `list_dir { agentId, path? }` — list a directory relative to the workdir
+- `run_command { agentId, cmd, timeout? }` — run a shell command **in the workdir**
+- `read_file { agentId, path }` / `write_file { agentId, path, content }` — paths
+  are relative to the workdir (or absolute); write creates parent dirs
+
+The working directory is remembered by the hub, keyed by agent **name**, so it
+behaves like a persistent shell session: set it once and keep working with
+relative paths, just like a local checkout.
 
 ## Environment
 

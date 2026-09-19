@@ -20,6 +20,15 @@ async function ctrl(method, path, body) {
 }
 const text = (s) => ({ content: [{ type: 'text', text: s }] });
 
+function fmtEntries(entries, truncated) {
+  if (!entries) return '';
+  const lines = entries
+    .sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name))
+    .map((e) => e.dir ? `  ${e.name}/` : `  ${e.name}  (${e.size ?? '?'}b)`);
+  if (truncated) lines.push('  … (truncated at 500)');
+  return lines.join('\n') || '  (empty)';
+}
+
 const server = new McpServer({ name: 'remote-agent-hub', version: '1.0.0' });
 
 server.registerTool('list_agents', {
@@ -30,21 +39,46 @@ server.registerTool('list_agents', {
   const { agents } = await ctrl('GET', '/agents');
   if (!agents.length) return text('No agents connected.');
   return text(agents.map(a =>
-    `• ${a.name}  [${a.id}]\n    ${a.meta.platform}/${a.meta.arch}  user=${a.meta.user}  cwd=${a.meta.cwd}  since ${a.connectedAt}  inflight=${a.inflight}`
+    `• ${a.name}  [${a.id}]\n    ${a.meta.platform}/${a.meta.arch}  user=${a.meta.user}  workdir=${a.cwd}  since ${a.connectedAt}  inflight=${a.inflight}`
   ).join('\n'));
+});
+
+server.registerTool('set_workdir', {
+  title: 'Set the working directory on an agent',
+  description: 'Change the persistent working directory for an agent, like `cd`. Accepts an absolute path or one relative to the current workdir (including ".."). All later run_command / read_file / write_file / list_dir calls use it, and it survives the agent reconnecting. Returns the new directory and its contents.',
+  inputSchema: {
+    agentId: z.string().describe('id from list_agents'),
+    path: z.string().describe('absolute path, or relative to the current workdir'),
+  },
+}, async ({ agentId, path }) => {
+  const r = await ctrl('POST', '/setwd', { agentId, path });
+  if (!r.ok) return text('cd failed: ' + r.error);
+  return text(`workdir -> ${r.cwd}\n` + fmtEntries(r.entries, r.truncated));
+});
+
+server.registerTool('list_dir', {
+  title: 'List a directory on an agent',
+  description: 'List a directory on the agent, relative to its current workdir (default: the workdir itself). Does not change the workdir.',
+  inputSchema: {
+    agentId: z.string(),
+    path: z.string().optional().describe('relative to the current workdir; default "."'),
+  },
+}, async ({ agentId, path }) => {
+  const r = await ctrl('POST', '/list', { agentId, path: path || '.' });
+  if (!r.ok) return text('list failed: ' + r.error);
+  return text(`${r.abs}\n` + fmtEntries(r.entries, r.truncated));
 });
 
 server.registerTool('run_command', {
   title: 'Run a shell command on an agent',
-  description: 'Execute a shell command on the chosen agent and return stdout/stderr/exit code. Pick agentId from list_agents.',
+  description: 'Execute a shell command on the chosen agent, in its current workdir, and return stdout/stderr/exit code. Use set_workdir first to choose where it runs.',
   inputSchema: {
     agentId: z.string().describe('id from list_agents'),
     cmd: z.string().describe('command line to run in the agent shell'),
-    cwd: z.string().optional().describe('working directory on the agent'),
     timeout: z.number().optional().describe('ms before the command is killed (default 120000)'),
   },
-}, async ({ agentId, cmd, cwd, timeout }) => {
-  const r = await ctrl('POST', '/exec', { agentId, cmd, cwd, timeout });
+}, async ({ agentId, cmd, timeout }) => {
+  const r = await ctrl('POST', '/exec', { agentId, cmd, timeout });
   const parts = [];
   if (r.stdout) parts.push(r.stdout.trimEnd());
   if (r.stderr) parts.push('[stderr]\n' + r.stderr.trimEnd());
@@ -54,7 +88,7 @@ server.registerTool('run_command', {
 
 server.registerTool('read_file', {
   title: 'Read a file from an agent',
-  description: 'Read a file on the chosen agent and return its text contents.',
+  description: 'Read a file on the chosen agent and return its text contents. Path is relative to the agent workdir (or absolute).',
   inputSchema: { agentId: z.string(), path: z.string() },
 }, async ({ agentId, path }) => {
   const r = await ctrl('POST', '/read', { agentId, path });
@@ -64,11 +98,11 @@ server.registerTool('read_file', {
 
 server.registerTool('write_file', {
   title: 'Write a file on an agent',
-  description: 'Write text contents to a file on the chosen agent (overwrites).',
+  description: 'Write text contents to a file on the chosen agent (creates parent dirs, overwrites). Path is relative to the agent workdir (or absolute).',
   inputSchema: { agentId: z.string(), path: z.string(), content: z.string() },
 }, async ({ agentId, path, content }) => {
   const r = await ctrl('POST', '/write', { agentId, path, dataB64: Buffer.from(content, 'utf8').toString('base64') });
-  return text(r.ok ? `wrote ${Buffer.byteLength(content)} bytes to ${path}` : 'write failed: ' + r.error);
+  return text(r.ok ? `wrote ${Buffer.byteLength(content)} bytes to ${r.abs}` : 'write failed: ' + r.error);
 });
 
 const transport = new StdioServerTransport();

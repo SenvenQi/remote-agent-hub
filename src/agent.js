@@ -67,6 +67,7 @@ function connect() {
     if (m.t === 'exec') return runExec(ws, m);
     if (m.t === 'read') return doRead(ws, m);
     if (m.t === 'write') return doWrite(ws, m);
+    if (m.t === 'list') return doList(ws, m);
   });
 
   ws.on('close', () => { log('[agent] disconnected, retrying in 3s'); setTimeout(connect, 3000); });
@@ -90,17 +91,44 @@ function runExec(ws, m) {
   child.on('close', () => clearTimeout(t));
 }
 
+// Paths from the operator may be relative; resolve them against the agent's
+// current working directory so remote work feels like local work.
+function abs(m) {
+  return path.resolve(m.cwd || process.cwd(), m.path || '.');
+}
+
 async function doRead(ws, m) {
   try {
-    const data = await fs.readFile(m.path);
-    send(ws, { t: 'result', reqId: m.reqId, ok: true, dataB64: data.toString('base64') });
+    const p = abs(m);
+    const data = await fs.readFile(p);
+    send(ws, { t: 'result', reqId: m.reqId, ok: true, abs: p, dataB64: data.toString('base64') });
   } catch (e) { send(ws, { t: 'result', reqId: m.reqId, ok: false, error: e.message }); }
 }
 
 async function doWrite(ws, m) {
   try {
-    await fs.writeFile(m.path, Buffer.from(m.dataB64 || '', 'base64'));
-    send(ws, { t: 'result', reqId: m.reqId, ok: true });
+    const p = abs(m);
+    await fs.mkdir(path.dirname(p), { recursive: true });
+    await fs.writeFile(p, Buffer.from(m.dataB64 || '', 'base64'));
+    send(ws, { t: 'result', reqId: m.reqId, ok: true, abs: p });
+  } catch (e) { send(ws, { t: 'result', reqId: m.reqId, ok: false, error: e.message }); }
+}
+
+// Also doubles as validation when the operator sets a working directory.
+async function doList(ws, m) {
+  try {
+    const p = abs(m);
+    const st = await fs.stat(p);
+    if (!st.isDirectory()) {
+      return send(ws, { t: 'result', reqId: m.reqId, ok: false, abs: p, error: 'not a directory' });
+    }
+    const ents = await fs.readdir(p, { withFileTypes: true });
+    const entries = await Promise.all(ents.slice(0, 500).map(async (e) => {
+      let size = null;
+      if (e.isFile()) { try { size = (await fs.stat(path.join(p, e.name))).size; } catch {} }
+      return { name: e.name, dir: e.isDirectory(), size };
+    }));
+    send(ws, { t: 'result', reqId: m.reqId, ok: true, abs: p, entries, truncated: ents.length > 500 });
   } catch (e) { send(ws, { t: 'result', reqId: m.reqId, ok: false, error: e.message }); }
 }
 
