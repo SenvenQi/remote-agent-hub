@@ -86,6 +86,47 @@ server.registerTool('run_command', {
   return text(parts.join('\n'));
 });
 
+server.registerTool('start_command', {
+  title: 'Start a long-running command (streaming)',
+  description: 'Start a command on the agent in its workdir WITHOUT waiting for it to finish. Returns a jobId immediately. Poll it with read_output to follow the output live (builds, test watchers, servers). Use kill_command to stop it. For quick commands prefer run_command.',
+  inputSchema: {
+    agentId: z.string().describe('id from list_agents'),
+    cmd: z.string().describe('command line to run in the agent shell'),
+    timeout: z.number().optional().describe('ms before the job is force-killed (default 3600000 = 1h)'),
+  },
+}, async ({ agentId, cmd, timeout }) => {
+  const r = await ctrl('POST', '/start', { agentId, cmd, timeout });
+  if (!r.ok) return text('start failed: ' + r.error);
+  return text(`started job ${r.jobId} in ${r.cwd}\nPoll it with read_output { jobId: "${r.jobId}", cursor: 0 }.`);
+});
+
+server.registerTool('read_output', {
+  title: 'Read new output from a running job',
+  description: 'Fetch output from a job started with start_command, from `cursor` onward. Long-polls: if there is no new output yet and the job is still running, it waits up to ~8s before returning. Pass the returned `cursor` on the next call to get only newer output; repeat until running is false. That loop is how you watch output stream in.',
+  inputSchema: {
+    jobId: z.string(),
+    cursor: z.number().optional().describe('byte/chunk cursor from the previous call; start at 0'),
+    wait: z.number().optional().describe('max ms to long-poll for new output (default 8000, max 55000)'),
+  },
+}, async ({ jobId, cursor, wait }) => {
+  const r = await ctrl('POST', '/output', { jobId, cursor: cursor || 0, wait });
+  if (!r.ok) return text('read_output failed: ' + r.error);
+  const status = r.running
+    ? `[running · cursor=${r.cursor}]`
+    : `[exited ${r.code}${r.signal ? ' ' + r.signal : ''}${r.error ? ' error=' + r.error : ''} · cursor=${r.cursor}]`;
+  const out = r.text ? r.text.replace(/\s+$/, '') : (r.running ? '(no new output yet)' : '(no output)');
+  return text(out + '\n' + status);
+});
+
+server.registerTool('kill_command', {
+  title: 'Stop a running job',
+  description: 'Force-kill a job started with start_command (kills the whole process tree on Windows).',
+  inputSchema: { agentId: z.string(), jobId: z.string() },
+}, async ({ agentId, jobId }) => {
+  const r = await ctrl('POST', '/kill', { agentId, jobId });
+  return text(r.ok ? `killed ${jobId}` : 'kill failed: ' + r.error);
+});
+
 server.registerTool('read_file', {
   title: 'Read a file from an agent',
   description: 'Read a file on the chosen agent and return its text contents. Path is relative to the agent workdir (or absolute).',

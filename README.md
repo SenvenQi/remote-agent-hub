@@ -67,7 +67,14 @@ Then in a session:
 - `set_workdir { agentId, path }` — like `cd`; absolute or relative (incl. `..`).
   Sticks for all later calls and **survives the agent reconnecting**.
 - `list_dir { agentId, path? }` — list a directory relative to the workdir
-- `run_command { agentId, cmd, timeout? }` — run a shell command **in the workdir**
+- `run_command { agentId, cmd, timeout? }` — run a shell command **in the workdir**,
+  waiting for it to finish (best for quick commands)
+- `start_command { agentId, cmd, timeout? }` — start a long-running command
+  (build, test watcher, server) and get a `jobId` back immediately
+- `read_output { jobId, cursor?, wait? }` — pull new output from a job from
+  `cursor` onward; **long-polls** up to ~8s so output streams in near real time.
+  Loop it, passing back the returned `cursor`, until `running` is false
+- `kill_command { agentId, jobId }` — force-kill a job (whole process tree)
 - `read_file { agentId, path }` / `write_file { agentId, path, content }` — paths
   are relative to the workdir (or absolute); write creates parent dirs
 

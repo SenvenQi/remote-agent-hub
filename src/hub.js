@@ -68,13 +68,15 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    // responses to in-flight control requests
+    // responses to in-flight control requests. A pending entry is either a
+    // one-shot request (has .resolve) or a streaming job (has .onChunk/.onExit).
     const p = agent.pending.get(msg.reqId);
     if (!p) return;
-    if (msg.t === 'stdout') p.stdout.push(msg.chunk);
-    else if (msg.t === 'stderr') p.stderr.push(msg.chunk);
+    if (msg.t === 'stdout') { p.onChunk ? p.onChunk('out', msg.chunk) : p.stdout.push(msg.chunk); }
+    else if (msg.t === 'stderr') { p.onChunk ? p.onChunk('err', msg.chunk) : p.stderr.push(msg.chunk); }
     else if (msg.t === 'exit') {
-      p.resolve({ ok: !msg.error, code: msg.code, signal: msg.signal, error: msg.error,
+      if (p.onExit) p.onExit(msg);
+      else p.resolve({ ok: !msg.error, code: msg.code, signal: msg.signal, error: msg.error,
         stdout: p.stdout.join(''), stderr: p.stderr.join('') });
       agent.pending.delete(msg.reqId);
     } else if (msg.t === 'result') {
@@ -87,7 +89,10 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     if (agent) {
       agents.delete(agent.id);
-      for (const p of agent.pending.values()) p.resolve({ ok: false, error: 'agent disconnected' });
+      for (const p of agent.pending.values()) {
+        if (p.onExit) p.onExit({ code: -1, error: 'agent disconnected' });
+        else p.resolve({ ok: false, error: 'agent disconnected' });
+      }
       audit('disconnect', { id: agent.id, name: agent.name });
       console.log(`[hub] - agent ${agent.name} (${agent.id})`);
     }
@@ -123,6 +128,61 @@ function dispatch(agentId, message, timeoutMs) {
   });
 }
 
+// ---- streaming jobs ------------------------------------------------------
+// A job runs a command on an agent without blocking. Output accumulates as
+// chunks; readers pull incrementally (with long-poll) so output can be
+// followed in near real time. Jobs are kept briefly after exit so the tail
+// can still be read, then reaped.
+/** @type {Map<string, any>} */
+const jobs = new Map();
+const JOB_TTL_MS = 5 * 60 * 1000;
+
+function wake(job) { const w = job.waiters; job.waiters = []; for (const r of w) r(); }
+
+function startJob(agent, cmd, timeoutMs) {
+  const id = newId('job');
+  const reqId = newId('req');
+  const job = { id, reqId, agentId: agent.id, name: agent.name, cmd, cwd: agent.cwd,
+    chunks: [], running: true, code: null, signal: null, error: null,
+    startedAt: Date.now(), endedAt: null, waiters: [] };
+  jobs.set(id, job);
+  agent.pending.set(reqId, {
+    onChunk: (s, d) => { job.chunks.push({ s, d }); wake(job); },
+    onExit: (msg) => {
+      job.running = false; job.code = msg.code; job.signal = msg.signal;
+      job.error = msg.error; job.endedAt = Date.now(); wake(job);
+      setTimeout(() => jobs.delete(id), JOB_TTL_MS);
+    },
+  });
+  send(agent.ws, { t: 'exec', reqId, cmd, cwd: agent.cwd, timeout: timeoutMs });
+  audit('start', { agentId: agent.id, cwd: agent.cwd, cmd, jobId: id });
+  return job;
+}
+
+// Return output from `cursor` onward. If nothing new and still running, wait
+// up to waitMs for a chunk or exit before returning (long-poll).
+function readOutput(job, cursor, waitMs) {
+  if (cursor >= job.chunks.length && job.running && waitMs > 0) {
+    return new Promise((resolve) => {
+      const done = () => { clearTimeout(t); resolve(snapshot(job, cursor)); };
+      const t = setTimeout(() => { job.waiters = job.waiters.filter((x) => x !== done); resolve(snapshot(job, cursor)); }, waitMs);
+      job.waiters.push(done);
+    });
+  }
+  return Promise.resolve(snapshot(job, cursor));
+}
+
+function snapshot(job, cursor) {
+  const slice = job.chunks.slice(cursor);
+  return {
+    ok: true, jobId: job.id, running: job.running,
+    text: slice.map((c) => c.d).join(''),
+    stderr: slice.filter((c) => c.s === 'err').map((c) => c.d).join(''),
+    cursor: job.chunks.length,
+    code: job.code, signal: job.signal, error: job.error,
+  };
+}
+
 // ---- Control side: the MCP bridge (localhost only) -----------------------
 function readBody(req) {
   return new Promise((res) => { let b = ''; req.on('data', c => b += c); req.on('end', () => res(b)); });
@@ -146,8 +206,9 @@ const ctrl = http.createServer(async (req, res) => {
 
   if (req.method === 'POST') {
     let body; try { body = JSON.parse(await readBody(req) || '{}'); } catch { return json(400, { error: 'bad json' }); }
+    // /output only needs a jobId; everything else acts on a specific agent.
     const agent = agents.get(body.agentId);
-    if (!agent) return json(404, { ok: false, error: `no agent ${body.agentId}` });
+    if (req.url !== '/output' && !agent) return json(404, { ok: false, error: `no agent ${body.agentId}` });
 
     if (req.url === '/exec') {
       const { cmd, timeout } = body;
@@ -170,6 +231,24 @@ const ctrl = http.createServer(async (req, res) => {
     if (req.url === '/list') {
       const r = await dispatch(agent.id, { t: 'list', cwd: agent.cwd, path: body.path || '.' }, 30000);
       return json(200, r);
+    }
+    if (req.url === '/start') {
+      if (!body.cmd) return json(400, { error: 'cmd required' });
+      const job = startJob(agent, body.cmd, body.timeout || 3600000);
+      return json(200, { ok: true, jobId: job.id, cwd: job.cwd });
+    }
+    if (req.url === '/output') {
+      const job = jobs.get(body.jobId);
+      if (!job) return json(404, { ok: false, error: `no job ${body.jobId} (finished jobs are reaped after 5 min)` });
+      const wait = Math.min(Math.max(body.wait ?? 8000, 0), 55000);
+      return json(200, await readOutput(job, body.cursor || 0, wait));
+    }
+    if (req.url === '/kill') {
+      const job = jobs.get(body.jobId);
+      if (!job) return json(404, { ok: false, error: `no job ${body.jobId}` });
+      audit('kill', { agentId: agent.id, jobId: job.id });
+      send(agent.ws, { t: 'kill', reqId: job.reqId });
+      return json(200, { ok: true });
     }
     if (req.url === '/setwd') {
       // resolve+validate on the agent (real filesystem, real path rules) so

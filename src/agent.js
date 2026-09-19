@@ -65,6 +65,7 @@ function connect() {
     if (m.t === 'denied') { log('[agent] denied:', m.reason); ws.close(); return; }
     if (m.t === 'ping') { send(ws, { t: 'pong' }); return; }
     if (m.t === 'exec') return runExec(ws, m);
+    if (m.t === 'kill') return doKill(m);
     if (m.t === 'read') return doRead(ws, m);
     if (m.t === 'write') return doWrite(ws, m);
     if (m.t === 'list') return doList(ws, m);
@@ -74,6 +75,9 @@ function connect() {
   ws.on('error', (e) => { log('[agent] ws error:', e.message); });
 }
 
+// running children, keyed by reqId, so a job can be killed on demand
+const children = new Map();
+
 function runExec(ws, m) {
   const args = isWin ? ['-NoProfile', '-NonInteractive', '-Command', m.cmd] : ['-c', m.cmd];
   let child;
@@ -82,13 +86,27 @@ function runExec(ws, m) {
   } catch (e) {
     return send(ws, { t: 'exit', reqId: m.reqId, code: -1, error: e.message });
   }
+  children.set(m.reqId, child);
   child.stdout.on('data', (d) => send(ws, { t: 'stdout', reqId: m.reqId, chunk: d.toString() }));
   child.stderr.on('data', (d) => send(ws, { t: 'stderr', reqId: m.reqId, chunk: d.toString() }));
   child.on('error', (e) => send(ws, { t: 'exit', reqId: m.reqId, code: -1, error: e.message }));
   child.on('close', (code, signal) => send(ws, { t: 'exit', reqId: m.reqId, code, signal }));
 
   const t = setTimeout(() => { try { child.kill(); } catch {} }, m.timeout || 120000);
-  child.on('close', () => clearTimeout(t));
+  child.on('close', () => { clearTimeout(t); children.delete(m.reqId); });
+}
+
+// Kill a running job. On Windows a tree-kill (taskkill /T) also reaps the
+// shell's grandchildren; elsewhere a plain signal.
+function doKill(m) {
+  const child = children.get(m.reqId);
+  if (!child) return;
+  if (isWin) {
+    try { spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true }); }
+    catch { try { child.kill(); } catch {} }
+  } else {
+    try { child.kill(m.signal || 'SIGTERM'); } catch {}
+  }
 }
 
 // Paths from the operator may be relative; resolve them against the agent's
