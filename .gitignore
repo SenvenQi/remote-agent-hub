@@ -3,3 +3,7 @@ hub-audit.log
 *.out
 .rah-token.local
 *.local.out
+# MSI installer build outputs / bundled binaries (regenerate with installer/build-msi.ps1)
+installer/stage/
+installer/*.msi
+installer/*.wixpdb

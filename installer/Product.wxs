@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Package Name="Remote Agent Hub Agent"
+           Manufacturer="Remote Agent Hub"
+           Version="1.0.0"
+           UpgradeCode="7E5C2A10-9B3D-4C7E-A1F2-000000000001"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of the Remote Agent Hub Agent is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Install locations -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="RemoteAgentHub" />
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DataFolder" Name="remote-agent-hub" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="Remote Agent Hub Agent" Level="1">
+      <ComponentGroupRef Id="AppFiles" />
+      <ComponentGroupRef Id="DataFiles" />
+    </Feature>
+
+    <!-- Bundled node + agent files (harvested from stage\app) -->
+    <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
+      <Files Include="stage\app\**" />
+    </ComponentGroup>
+    <!-- config.json into C:\ProgramData\remote-agent-hub (where the agent looks by default) -->
+    <ComponentGroup Id="DataFiles" Directory="DataFolder">
+      <Files Include="stage\data\**" />
+    </ComponentGroup>
+
+    <!-- Optional token injected at install time: msiexec /i ... RAHTOKEN=<secret>
+         Not embedded in the MSI. If omitted, config.json ships with an empty token
+         and the agent stays idle until an admin fills it in on the client. -->
+    <Property Id="RAHTOKEN" Secure="yes" />
+    <CustomAction Id="WriteToken.SetProperty" Property="WriteToken"
+      Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -Command &quot;$p='[CommonAppDataFolder]remote-agent-hub\config.json'; $j=Get-Content $p -Raw | ConvertFrom-Json; $j.token='[RAHTOKEN]'; ($j | ConvertTo-Json) | Set-Content $p -Encoding UTF8&quot;" />
+    <CustomAction Id="WriteToken" DllEntry="WixQuietExec64" Execute="deferred"
+      Impersonate="no" Return="ignore" BinaryRef="Wix4UtilCA_X64" />
+
+    <!-- ===== Scheduled task: create + start on install, remove on uninstall ===== -->
+    <!-- Deferred (SYSTEM) actions; their command lines are supplied by matching SetProperty CAs so [INSTALLFOLDER]/[System64Folder] resolve. -->
+    <CustomAction Id="CreateTask.SetProperty" Property="CreateTask"
+      Value="&quot;[System64Folder]schtasks.exe&quot; /create /tn RemoteAgentHub /xml &quot;[INSTALLFOLDER]task.xml&quot; /f" />
+    <CustomAction Id="CreateTask" DllEntry="WixQuietExec64" Execute="deferred"
+      Impersonate="no" Return="check" BinaryRef="Wix4UtilCA_X64" />
+
+    <CustomAction Id="RunTask.SetProperty" Property="RunTask"
+      Value="&quot;[System64Folder]schtasks.exe&quot; /run /tn RemoteAgentHub" />
+    <CustomAction Id="RunTask" DllEntry="WixQuietExec64" Execute="deferred"
+      Impersonate="no" Return="ignore" BinaryRef="Wix4UtilCA_X64" />
+
+    <CustomAction Id="EndTask.SetProperty" Property="EndTask"
+      Value="&quot;[System64Folder]schtasks.exe&quot; /end /tn RemoteAgentHub" />
+    <CustomAction Id="EndTask" DllEntry="WixQuietExec64" Execute="deferred"
+      Impersonate="no" Return="ignore" BinaryRef="Wix4UtilCA_X64" />
+
+    <CustomAction Id="DeleteTask.SetProperty" Property="DeleteTask"
+      Value="&quot;[System64Folder]schtasks.exe&quot; /delete /tn RemoteAgentHub /f" />
+    <CustomAction Id="DeleteTask" DllEntry="WixQuietExec64" Execute="deferred"
+      Impersonate="no" Return="ignore" BinaryRef="Wix4UtilCA_X64" />
+
+    <InstallExecuteSequence>
+      <Custom Action="WriteToken.SetProperty" After="InstallFiles" Condition="NOT Installed AND RAHTOKEN&lt;&gt;&quot;&quot;" />
+      <Custom Action="WriteToken" After="WriteToken.SetProperty" Condition="NOT Installed AND RAHTOKEN&lt;&gt;&quot;&quot;" />
+      <Custom Action="CreateTask.SetProperty" After="WriteToken" Condition="NOT Installed" />
+      <Custom Action="CreateTask" After="CreateTask.SetProperty" Condition="NOT Installed" />
+      <Custom Action="RunTask.SetProperty" After="CreateTask" Condition="NOT Installed" />
+      <Custom Action="RunTask" After="RunTask.SetProperty" Condition="NOT Installed" />
+
+      <Custom Action="EndTask.SetProperty" Before="RemoveFiles" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="EndTask" After="EndTask.SetProperty" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="DeleteTask.SetProperty" After="EndTask" Condition="REMOVE=&quot;ALL&quot;" />
+      <Custom Action="DeleteTask" After="DeleteTask.SetProperty" Condition="REMOVE=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+    <!-- Minimal install UI with a license page -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+  </Package>
+</Wix>

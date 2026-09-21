@@ -86,6 +86,31 @@ The working directory is remembered by the hub, keyed by agent **name**, so it
 behaves like a persistent shell session: set it once and keep working with
 relative paths, just like a local checkout.
 
+## Windows MSI (bundled Node, zero client deps)
+
+`installer/` builds a single `.msi` that bundles Node and the agent, so a client
+needs nothing preinstalled. It installs to `C:\Program Files\RemoteAgentHub`,
+writes config to `C:\ProgramData\remote-agent-hub\config.json`, and registers a
+boot-start SYSTEM scheduled task (removed on uninstall).
+
+Build it (needs `dotnet tool install --global wix --version 5.0.2` plus the Util
+and UI extensions):
+
+```powershell
+installer\build-msi.ps1 -HubUrl ws://YOUR-SERVER:8787
+```
+
+The shared token is **not** baked into the MSI. Supply it at install time:
+
+```powershell
+msiexec /i RemoteAgentHubAgent.msi RAHTOKEN=<shared-secret> /qb
+```
+
+Double-clicking installs with an empty token instead; fill it into
+`C:\ProgramData\remote-agent-hub\config.json` on the client afterward and run
+`schtasks /run /tn RemoteAgentHub`. Uninstall from Add/Remove Programs (or
+`msiexec /x`), which stops and deletes the task.
+
 ## Environment
 
 | var | who | meaning |
