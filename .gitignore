@@ -7,3 +7,5 @@ hub-audit.log
 installer/stage/
 installer/*.msi
 installer/*.wixpdb
+*.svc.out
+*.svc.err
