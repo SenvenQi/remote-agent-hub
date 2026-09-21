@@ -22,14 +22,32 @@ import { send } from './protocol.js';
 
 const isWin = process.platform === 'win32';
 
+function dataDir() {
+  return isWin
+    ? path.join(process.env.ProgramData || 'C:\\ProgramData', 'remote-agent-hub')
+    : '/etc/remote-agent-hub';
+}
+
+// A log destination is chosen BEFORE config is validated, so startup problems
+// (missing/broken config) always leave a trace on disk -- even under a Windows
+// scheduled task whose stderr goes nowhere. Config can override it later.
+let logfile = process.env.RAH_LOGFILE || path.join(dataDir(), 'agent.log');
+function log(...a) {
+  const line = `[${new Date().toISOString()}] ${a.join(' ')}`;
+  process.stderr.write(line + '\n');
+  try { fss.mkdirSync(path.dirname(logfile), { recursive: true }); fss.appendFileSync(logfile, line + '\n'); } catch {}
+}
+
 function loadConfig() {
-  const def = isWin
-    ? path.join(process.env.ProgramData || 'C:\\ProgramData', 'remote-agent-hub', 'config.json')
-    : '/etc/remote-agent-hub/config.json';
-  const p = process.env.RAH_CONFIG || def;
-  let file = {};
-  try { file = JSON.parse(fss.readFileSync(p, 'utf8')); } catch { /* no file is fine */ }
+  const p = process.env.RAH_CONFIG || path.join(dataDir(), 'config.json');
+  let file = {}, existed = false, parseErr = null;
+  try {
+    const raw = fss.readFileSync(p, 'utf8');
+    existed = true;
+    try { file = JSON.parse(raw); } catch (e) { parseErr = e.message; }
+  } catch { /* file not found is fine (env may supply everything) */ }
   return {
+    path: p, existed, parseErr,
     hub: process.env.RAH_HUB || file.hub,
     token: process.env.RAH_TOKEN || file.token,
     name: process.env.RAH_NAME || file.name || os.hostname(),
@@ -39,15 +57,19 @@ function loadConfig() {
 }
 
 const cfg = loadConfig();
-if (!cfg.hub || !cfg.token) {
-  console.error('[agent] need hub URL and token (env RAH_HUB/RAH_TOKEN or config.json)');
-  process.exit(1);
-}
+if (cfg.logfile) logfile = cfg.logfile; // honor configured log path from here on
 
-function log(...a) {
-  const line = `[${new Date().toISOString()}] ${a.join(' ')}`;
-  process.stderr.write(line + '\n');
-  if (cfg.logfile) { try { fss.appendFileSync(cfg.logfile, line + '\n'); } catch {} }
+// Always record what we found, so a silent failure is never a mystery again.
+log(`[agent] starting (node ${process.version}, ${process.platform}) as ${os.userInfo().username}`);
+log(`[agent] config: ${cfg.path}  exists=${cfg.existed}  parsed=${!cfg.parseErr}`);
+if (cfg.existed && cfg.parseErr) {
+  log(`[agent] CONFIG IS NOT VALID JSON: ${cfg.parseErr}`);
+  log(`[agent]   common cause: single backslashes in a Windows path (use \\\\) or a trailing comma.`);
+}
+if (!cfg.hub || !cfg.token) {
+  log(`[agent] CANNOT START: missing ${!cfg.hub ? 'hub URL' : ''}${(!cfg.hub && !cfg.token) ? ' and ' : ''}${!cfg.token ? 'token' : ''}.`);
+  log(`[agent]   set them in ${cfg.path} (as valid JSON) or via RAH_HUB/RAH_TOKEN. Exiting.`);
+  process.exit(1);
 }
 
 function connect() {
@@ -180,5 +202,5 @@ async function doList(ws, m) {
   } catch (e) { send(ws, { t: 'result', reqId: m.reqId, ok: false, error: e.message }); }
 }
 
-log(`[agent] ${cfg.name} dialing ${cfg.hub}`);
+log(`[agent] ${cfg.name} dialing ${cfg.hub} (token length ${cfg.token.length})`);
 connect();
