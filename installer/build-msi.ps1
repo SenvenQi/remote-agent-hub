@@ -38,6 +38,7 @@ Copy-Item $node "$app\node.exe" -Force
 Copy-Item "$repo\src\agent.js","$repo\src\protocol.js" $app -Force
 Copy-Item "$repo\node_modules\ws" "$app\node_modules\ws" -Recurse -Force
 Copy-Item "$PSScriptRoot\task.xml" $app -Force
+Copy-Item "$PSScriptRoot\tray\rah-tray.ps1","$PSScriptRoot\tray\rah-tray.vbs" $app -Force
 
 # config.json without a token (injected at install time via RAHTOKEN)
 [ordered]@{
@@ -46,10 +47,10 @@ Copy-Item "$PSScriptRoot\task.xml" $app -Force
   logfile = "C:\ProgramData\remote-agent-hub\agent.log"
 } | ConvertTo-Json | Set-Content "$data\config.json" -Encoding UTF8
 
-# build
+# build (remove stale output first so a failure can't look like success)
+Remove-Item $Out -Force -ErrorAction SilentlyContinue
 & $wix build "$PSScriptRoot\Product.wxs" `
   -ext WixToolset.Util.wixext -ext WixToolset.UI.wixext `
   -arch x64 -o $Out
-if (Test-Path $Out) {
-  "Built $Out ({0:N1} MB)" -f ((Get-Item $Out).Length / 1MB)
-} else { throw "build failed" }
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path $Out)) { throw "wix build failed (exit $LASTEXITCODE)" }
+"Built $Out ({0:N1} MB)" -f ((Get-Item $Out).Length / 1MB)

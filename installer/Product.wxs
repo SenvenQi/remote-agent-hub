@@ -20,11 +20,33 @@
     <StandardDirectory Id="CommonAppDataFolder">
       <Directory Id="DataFolder" Name="remote-agent-hub" />
     </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppShortcutDir" Name="Remote Agent Hub" />
+    </StandardDirectory>
 
     <Feature Id="Main" Title="Remote Agent Hub Agent" Level="1">
       <ComponentGroupRef Id="AppFiles" />
       <ComponentGroupRef Id="DataFiles" />
+      <ComponentRef Id="TrayShortcut" />
+      <ComponentRef Id="TrayAutostart" />
     </Feature>
+
+    <!-- Start Menu shortcut to the tray panel (launched silently via wscript) -->
+    <Component Id="TrayShortcut" Directory="AppShortcutDir" Guid="7E5C2A10-9B3D-4C7E-A1F2-000000000010">
+      <Shortcut Id="TraySc" Name="Remote Agent Hub"
+                Target="[System64Folder]wscript.exe"
+                Arguments="&quot;[INSTALLFOLDER]rah-tray.vbs&quot;"
+                WorkingDirectory="INSTALLFOLDER" />
+      <RemoveFolder Id="RmAppShortcutDir" On="uninstall" />
+      <RegistryValue Root="HKLM" Key="Software\RemoteAgentHub" Name="trayShortcut" Type="integer" Value="1" KeyPath="yes" />
+    </Component>
+
+    <!-- Start the tray panel at logon for any user (agent stays SYSTEM separately) -->
+    <Component Id="TrayAutostart" Directory="INSTALLFOLDER" Guid="7E5C2A10-9B3D-4C7E-A1F2-000000000011">
+      <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run"
+                     Name="RemoteAgentHubTray" Type="string"
+                     Value="&quot;[System64Folder]wscript.exe&quot; &quot;[INSTALLFOLDER]rah-tray.vbs&quot;" KeyPath="yes" />
+    </Component>
 
     <!-- Bundled node + agent files (harvested from stage\app) -->
     <ComponentGroup Id="AppFiles" Directory="INSTALLFOLDER">
