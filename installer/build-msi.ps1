@@ -40,12 +40,14 @@ Copy-Item "$repo\node_modules\ws" "$app\node_modules\ws" -Recurse -Force
 Copy-Item "$PSScriptRoot\task.xml" $app -Force
 Copy-Item "$PSScriptRoot\tray\rah-tray.ps1","$PSScriptRoot\tray\rah-tray.vbs" $app -Force
 
-# config.json without a token (injected at install time via RAHTOKEN)
-[ordered]@{
+# config.json without a token (injected at install time via RAHTOKEN).
+# Write UTF-8 WITHOUT BOM -- Node's JSON.parse rejects a BOM.
+$cfgJson = [ordered]@{
   hub     = $HubUrl
   token   = ""
   logfile = "C:\ProgramData\remote-agent-hub\agent.log"
-} | ConvertTo-Json | Set-Content "$data\config.json" -Encoding UTF8
+} | ConvertTo-Json
+[System.IO.File]::WriteAllText("$data\config.json", $cfgJson, (New-Object System.Text.UTF8Encoding($false)))
 
 # build (remove stale output first so a failure can't look like success)
 Remove-Item $Out -Force -ErrorAction SilentlyContinue

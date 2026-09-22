@@ -42,7 +42,9 @@ function loadConfig() {
   const p = process.env.RAH_CONFIG || path.join(dataDir(), 'config.json');
   let file = {}, existed = false, parseErr = null;
   try {
-    const raw = fss.readFileSync(p, 'utf8');
+    // strip a leading UTF-8 BOM -- PowerShell's `Set-Content -Encoding UTF8`
+    // writes one, and JSON.parse rejects it.
+    const raw = fss.readFileSync(p, 'utf8').replace(/^﻿/, '');
     existed = true;
     try { file = JSON.parse(raw); } catch (e) { parseErr = e.message; }
   } catch { /* file not found is fine (env may supply everything) */ }

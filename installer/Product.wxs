@@ -61,6 +61,9 @@
          Not embedded in the MSI. If omitted, config.json ships with an empty token
          and the agent stays idle until an admin fills it in on the client. -->
     <Property Id="RAHTOKEN" Secure="yes" />
+    <!-- NB: keep this PowerShell free of [square brackets], which MSI's
+         formatting engine would try to resolve as properties. The agent strips
+         any BOM that Set-Content writes, so a BOM here is harmless. -->
     <CustomAction Id="WriteToken.SetProperty" Property="WriteToken"
       Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -ExecutionPolicy Bypass -Command &quot;$p='[CommonAppDataFolder]remote-agent-hub\config.json'; $j=Get-Content $p -Raw | ConvertFrom-Json; $j.token='[RAHTOKEN]'; ($j | ConvertTo-Json) | Set-Content $p -Encoding UTF8&quot;" />
     <CustomAction Id="WriteToken" DllEntry="WixQuietExec64" Execute="deferred"

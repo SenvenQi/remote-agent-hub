@@ -98,8 +98,9 @@ $btnSave.Add_Click({
     [System.Windows.Forms.MessageBox]::Show('Hub 和 Token 都要填。', 'Remote Agent Hub') | Out-Null; return
   }
   $eh = $hub -replace "'", "''"; $et = $tok -replace "'", "''"
+  # write UTF-8 WITHOUT BOM (Node's JSON.parse rejects a BOM)
   $cmd = "`$c=[ordered]@{hub='$eh';token='$et';logfile='$($LogPath -replace "'","''")'};" +
-         "`$c|ConvertTo-Json|Set-Content '$($ConfigPath -replace "'","''")' -Encoding UTF8;" +
+         "[IO.File]::WriteAllText('$($ConfigPath -replace "'","''")',(`$c|ConvertTo-Json),(New-Object System.Text.UTF8Encoding(`$false)));" +
          "schtasks /end /tn $TaskName 2>`$null; Start-Sleep -Milliseconds 500; schtasks /run /tn $TaskName"
   try {
     Start-Process powershell -Verb RunAs -WindowStyle Hidden -ArgumentList '-NoProfile','-Command',$cmd
